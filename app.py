@@ -42,39 +42,33 @@ def compact(s):
  return re.sub(r'[^a-z0-9]+','',unicodedata.normalize('NFKD',str(s or '')).encode('ascii','ignore').decode().lower())
 
 def scrape_nesine(daily):
- """Nesine public football bulletin. Match only when both team names are found in the same nearby text block."""
+ """Nesine resmi bulten JSON'u: MS 1-X-2, 2.5 Alt/Ust ve KG Var/Yok."""
  try:
-  r=requests.get(NESINE,headers={**HEAD,'Accept':'text/html,application/xhtml+xml'},timeout=30)
-  if r.status_code!=200 or len(r.text)<1000:return [],f'Nesine HTTP {r.status_code}'
-  soup=BeautifulSoup(r.text,'html.parser')
-  # Script/style noise makes proximity matching worse.
-  for x in soup(['script','style','noscript']):x.decompose()
-  txt=' '.join(soup.stripped_strings)
-  low=unicodedata.normalize('NFKD',txt).encode('ascii','ignore').decode().lower()
-  out=[]
+  api='https://cdnbulten.nesine.com/api/bulten/getprebultenfull'
+  r=requests.get(api,headers={**HEAD,'Accept':'application/json,text/plain,*/*','Referer':'https://www.nesine.com/'},timeout=40); r.raise_for_status(); data=r.json()
+  events=[e for e in (data.get('sg',{}).get('EA') or []) if e.get('TYPE')==1 and e.get('GT')==1 and e.get('HN') and e.get('AN')]; parsed=[]
+  for e in events:
+   o={'home':e.get('HN',''),'away':e.get('AN',''),'time':str(e.get('T') or '')[:5],'ms1':None,'msx':None,'ms2':None,'gol25_alt':None,'gol25_ust':None,'kg_var':None,'kg_yok':None}
+   for mk in e.get('MA',[]) or []:
+    vals={x.get('N'):fnum(x.get('O')) for x in (mk.get('OCA') or [])}; mtid=mk.get('MTID')
+    try:sov=float(mk.get('SOV') or 0)
+    except:sov=0
+    if mtid==1:o['ms1'],o['msx'],o['ms2']=vals.get(1),vals.get(2),vals.get(3)
+    elif mtid==12 and abs(sov-2.5)<.001:o['gol25_alt'],o['gol25_ust']=vals.get(1),vals.get(2)
+    elif mtid==38:o['kg_var'],o['kg_yok']=vals.get(1),vals.get(2)
+   parsed.append(o)
+  out=[]; used=set()
   for _,m in daily.iterrows():
-   h=unicodedata.normalize('NFKD',str(m.home_team)).encode('ascii','ignore').decode().lower().strip()
-   a=unicodedata.normalize('NFKD',str(m.away_team)).encode('ascii','ignore').decode().lower().strip()
-   if len(h)<3 or len(a)<3:continue
-   # Search a bounded neighborhood: prevents odds from a neighboring fixture being attached.
-   starts=[x.start() for x in re.finditer(re.escape(h),low)]
-   best=None
-   for p in starts:
-    lo=max(0,p-180); hi=min(len(low),p+650); block=low[lo:hi]
-    if a not in block:continue
-    # Nesine renders labels as MS 1 / MS X / MS 2 / 2,5 Alt / 2,5 Üst.
-    pats={
-     'ms1':r'ms\s*1\s*([0-9]+[\.,][0-9]+)',
-     'msx':r'ms\s*x\s*([0-9]+[\.,][0-9]+)',
-     'ms2':r'ms\s*2\s*([0-9]+[\.,][0-9]+)',
-     'gol25_alt':r'2\s*[,\.]?5\s*alt\s*([0-9]+[\.,][0-9]+)',
-     'gol25_ust':r'2\s*[,\.]?5\s*ust\s*([0-9]+[\.,][0-9]+)'}
-    vals={k:(fnum(mm.group(1)) if (mm:=re.search(pat,block,re.I)) else None) for k,pat in pats.items()}
-    if all(vals[k] is not None for k in ('ms1','msx','ms2')):
-     best=vals;break
-   if best:out.append({'match_id':m.match_id,**best,'source':NESINE})
-  return out,f'Nesine: {len(out)} eşleşme'
- except Exception as e:return [],f'Nesine hata: {e}'
+   h,a=norm(m.home_team),norm(m.away_team); best=None; bs=0
+   for i,o in enumerate(parsed):
+    if i in used:continue
+    sc=(SequenceMatcher(None,h,norm(o['home'])).ratio()+SequenceMatcher(None,a,norm(o['away'])).ratio())/2
+    if m.time_tr and o['time']==m.time_tr:sc+=.08
+    if sc>bs:bs=sc;best=(i,o)
+   if best and bs>=.78:
+    i,o=best;used.add(i);out.append({'match_id':m.match_id,**{k:o[k] for k in ('ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok')},'source':'Nesine Bulten API'})
+  return out,f'Nesine API: {len(events)} futbol / {len(out)} eşleşme'
+ except Exception as e:return [],f'Nesine API hata: {e}'
 
 def scrape_program():
  # Legacy public program page: MS 1-X-2 + 2.5 Alt/Üst + double chance are visible without opening match detail.
@@ -109,8 +103,8 @@ def attach_odds(day):
  nes, msg=scrape_nesine(daily);notes.append(msg)
  with db() as c:
   for o in nes:
-   c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,odds_source=?,updated_at=? WHERE match_date=? AND match_id=?',
-    (o['ms1'],o['msx'],o['ms2'],o['gol25_alt'],o['gol25_ust'],o['source'],datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),o['match_id']))
+   c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,kg_var=?,kg_yok=?,odds_source=?,updated_at=? WHERE match_date=? AND match_id=?',
+     (o['ms1'],o['msx'],o['ms2'],o['gol25_alt'],o['gol25_ust'],o['kg_var'],o['kg_yok'],o['source'],datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),o['match_id']))
    total+=1
  # 2) Mackolik archive is fallback only for still-empty matches.
  daily=load_daily(day.isoformat()); missing=daily[daily[['ms1','msx','ms2']].isna().any(axis=1)]
@@ -171,10 +165,10 @@ with t1:
  d=load_daily(ds)
  if d.empty:st.info('Önce MAÇLARI ÇEK.')
  else:
-  a=int(d[['ms1','msx','ms2']].notna().all(axis=1).sum()); n_nesine=int(d.odds_source.fillna('').str.contains('nesine.com',case=False).sum()); n_macko=int(d.odds_source.fillna('').str.contains('mackolik.com',case=False).sum())
+  a=int(d[['ms1','msx','ms2']].notna().all(axis=1).sum()); n_nesine=int(d.odds_source.fillna('').str.contains('Nesine',case=False).sum()); n_macko=int(d.odds_source.fillna('').str.contains('mackolik.com',case=False).sum())
   cA,cB,cC,cD=st.columns(4);cA.metric('Günün maçları',len(d));cB.metric('Analize hazır',a);cC.metric('Nesine',n_nesine);cD.metric('Yedek kaynak',n_macko)
   q=st.text_input('🔎 Maç ara'); sh=d if not q else d[d.match_name.str.contains(q,case=False,na=False,regex=False)]
-  st.dataframe(sh[['time_tr','match_name','competition_name','state','ms1','msx','ms2','gol25_alt','gol25_ust','odds_source']],use_container_width=True,hide_index=True)
+  st.dataframe(sh[['time_tr','match_name','competition_name','state','ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok','odds_source']],use_container_width=True,hide_index=True)
 with t2:
  d=load_daily(ds); ready=d[d[['ms1','msx','ms2']].notna().all(axis=1)] if not d.empty else d
  if ready.empty:st.warning('Henüz analiz edilecek doğrulanmış MS oranı yok.')
