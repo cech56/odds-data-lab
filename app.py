@@ -41,22 +41,25 @@ def fetch_matches(day):
 def compact(s):
  return re.sub(r'[^a-z0-9]+','',unicodedata.normalize('NFKD',str(s or '')).encode('ascii','ignore').decode().lower())
 
-def scrape_nesine(daily):
- """Nesine resmi bulten JSON'u: MS 1-X-2, 2.5 Alt/Ust ve KG Var/Yok."""
+def scrape_nesine(daily, day):
+ """Nesine resmi bulten JSON'u. Yalnizca istenen gunun gercek, MS marketli futbol maclarini eslestirir."""
  try:
   api='https://cdnbulten.nesine.com/api/bulten/getprebultenfull'
   r=requests.get(api,headers={**HEAD,'Accept':'application/json,text/plain,*/*','Referer':'https://www.nesine.com/'},timeout=40); r.raise_for_status(); data=r.json()
-  events=[e for e in (data.get('sg',{}).get('EA') or []) if e.get('TYPE')==1 and e.get('GT')==1 and e.get('HN') and e.get('AN')]; parsed=[]
-  for e in events:
+  nesine_day=day.strftime('%d.%m.%Y'); parsed=[]
+  for e in (data.get('sg',{}).get('EA') or []):
+   if e.get('TYPE')!=1 or e.get('GT')!=1 or not e.get('HN') or not e.get('AN') or e.get('D')!=nesine_day:continue
+   markets=e.get('MA',[]) or []
+   if not any(mk.get('MTID')==1 for mk in markets):continue
    o={'home':e.get('HN',''),'away':e.get('AN',''),'time':str(e.get('T') or '')[:5],'ms1':None,'msx':None,'ms2':None,'gol25_alt':None,'gol25_ust':None,'kg_var':None,'kg_yok':None}
-   for mk in e.get('MA',[]) or []:
+   for mk in markets:
     vals={x.get('N'):fnum(x.get('O')) for x in (mk.get('OCA') or [])}; mtid=mk.get('MTID')
     try:sov=float(mk.get('SOV') or 0)
     except:sov=0
     if mtid==1:o['ms1'],o['msx'],o['ms2']=vals.get(1),vals.get(2),vals.get(3)
     elif mtid==12 and abs(sov-2.5)<.001:o['gol25_alt'],o['gol25_ust']=vals.get(1),vals.get(2)
     elif mtid==38:o['kg_var'],o['kg_yok']=vals.get(1),vals.get(2)
-   parsed.append(o)
+   if all(o[k] is not None for k in ('ms1','msx','ms2')):parsed.append(o)
   out=[]; used=set()
   for _,m in daily.iterrows():
    h,a=norm(m.home_team),norm(m.away_team); best=None; bs=0
@@ -67,7 +70,7 @@ def scrape_nesine(daily):
     if sc>bs:bs=sc;best=(i,o)
    if best and bs>=.78:
     i,o=best;used.add(i);out.append({'match_id':m.match_id,**{k:o[k] for k in ('ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok')},'source':'Nesine Bulten API'})
-  return out,f'Nesine API: {len(events)} futbol / {len(out)} eşleşme'
+  return out,f'Nesine API {nesine_day}: {len(parsed)} gercek mac / {len(out)} eslesme'
  except Exception as e:return [],f'Nesine API hata: {e}'
 
 def scrape_program():
@@ -100,7 +103,7 @@ def attach_odds(day):
  if daily.empty:return 0,'Önce maçları çek.'
  total=0; notes=[]
  # 1) NESINE is primary.
- nes, msg=scrape_nesine(daily);notes.append(msg)
+ nes, msg=scrape_nesine(daily,day);notes.append(msg)
  with db() as c:
   for o in nes:
    c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,kg_var=?,kg_yok=?,odds_source=?,updated_at=? WHERE match_date=? AND match_id=?',
@@ -175,7 +178,18 @@ with t2:
  else:
   labels=[f'{r.time_tr} • {r.match_name}' for _,r in ready.iterrows()];pick=st.selectbox('Maç seç',labels);r=ready.iloc[labels.index(pick)]
   st.markdown(f"### {r.match_name}");st.write(f"MS: **{r.ms1:.2f} / {r.msx:.2f} / {r.ms2:.2f}**")
-  tol=.05;m=DF.ms1.notna()&DF.msx.notna()&DF.ms2.notna()&(DF.ms1-r.ms1).abs().le(tol)&(DF.msx-r.msx).abs().le(tol)&(DF.ms2-r.ms2).abs().le(tol);s=DF[m];st.metric('Benzer geçmiş maç',len(s))
+  # Kademeli tolerans: ±0.05'ten başla; en az 10 benzer maç bulunana kadar genişlet.
+  # Bir adımda 10'u aşarsa o adımda bulunan tüm maçları kullan.
+  tolerances=[.05,.07,.10,.15,.20,.25,.30,.40,.50,1.00]
+  s=DF.iloc[0:0].copy();tol=tolerances[-1]
+  valid=DF.ms1.notna()&DF.msx.notna()&DF.ms2.notna()
+  for current_tol in tolerances:
+   m=valid&(DF.ms1-r.ms1).abs().le(current_tol)&(DF.msx-r.msx).abs().le(current_tol)&(DF.ms2-r.ms2).abs().le(current_tol)
+   s=DF[m];tol=current_tol
+   if len(s)>=10:break
+  ctol1,ctol2=st.columns(2)
+  ctol1.metric('Benzer geçmiş maç',len(s))
+  ctol2.metric('Kullanılan tolerans',f'±{tol:.2f}')
   rr=[]
   for n,base in [(x,s[s._ft]) for x in ['MS 1','MS X','MS 2','2.5 ÜST','2.5 ALT','KG VAR','KG YOK']]+[(x,s[s._ht]) for x in ['İY 0.5 ÜST','İY 0.5 ALT','İY 1.5 ÜST','İY 1.5 ALT']]:
    N=len(base);h=int(base[n].sum()) if N else 0;rr.append([n,h,N,round(100*h/N,1) if N else None])
