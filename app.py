@@ -103,13 +103,23 @@ def scrape_program():
 def attach_odds(day):
  daily=load_daily(day.isoformat())
  if daily.empty:return 0,'Önce maçları çek.'
+ # Her yenilemede eski oranlari temizle. Boylece sabahki oranlar oglen yeni veri gelmezse
+ # yanlislikla "guncel" diye ekranda kalmaz.
+ with db() as c:
+  c.execute('''UPDATE daily_matches SET
+   ms1=NULL,msx=NULL,ms2=NULL,kg_var=NULL,kg_yok=NULL,
+   gol25_alt=NULL,gol25_ust=NULL,iy_ms1=NULL,iy_msx=NULL,iy_ms2=NULL,
+   iy05_alt=NULL,iy05_ust=NULL,iy15_alt=NULL,iy15_ust=NULL,
+   odds_source=NULL,odds_updated_at=NULL
+   WHERE match_date=?''',[day.isoformat()])
+ daily=load_daily(day.isoformat())
  total=0; notes=[]
- # 1) NESINE is primary.
+ # 1) NESINE is primary and is requested again on every button press.
  nes, msg=scrape_nesine(daily,day);notes.append(msg)
  with db() as c:
   for o in nes:
-   c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,kg_var=?,kg_yok=?,iy05_alt=?,iy05_ust=?,iy15_alt=?,iy15_ust=?,odds_source=?,updated_at=? WHERE match_date=? AND match_id=?',
-     (o['ms1'],o['msx'],o['ms2'],o['gol25_alt'],o['gol25_ust'],o['kg_var'],o['kg_yok'],o['iy05_alt'],o['iy05_ust'],o['iy15_alt'],o['iy15_ust'],o['source'],datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),o['match_id']))
+   c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,kg_var=?,kg_yok=?,iy05_alt=?,iy05_ust=?,iy15_alt=?,iy15_ust=?,odds_source=?,updated_at=?,odds_updated_at=? WHERE match_date=? AND match_id=?',
+     (o['ms1'],o['msx'],o['ms2'],o['gol25_alt'],o['gol25_ust'],o['kg_var'],o['kg_yok'],o['iy05_alt'],o['iy05_ust'],o['iy15_alt'],o['iy15_ust'],o['source'],datetime.now(IST).isoformat(timespec='seconds'),datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),o['match_id']))
    total+=1
  # 2) Mackolik archive is fallback only for still-empty matches.
  daily=load_daily(day.isoformat()); missing=daily[daily[['ms1','msx','ms2']].isna().any(axis=1)]
@@ -123,8 +133,8 @@ def attach_odds(day):
      if m.time_tr and o['time']==m.time_tr:s+=.08
      if s>bs:bs=s;best=o
     if best and bs>=.72:
-     c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,odds_source=?,updated_at=? WHERE match_date=? AND match_id=?',
-      (best['ms1'],best['msx'],best['ms2'],best['gol25_alt'],best['gol25_ust'],best['source'],datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),m.match_id));total+=1
+     c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,odds_source=?,updated_at=?,odds_updated_at=? WHERE match_date=? AND match_id=?',
+      (best['ms1'],best['msx'],best['ms2'],best['gol25_alt'],best['gol25_ust'],best['source'],datetime.now(IST).isoformat(timespec='seconds'),datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),m.match_id));total+=1
  return total,' | '.join(notes)
 
 def load_daily(ds):
@@ -158,11 +168,17 @@ t1,t2,t3=st.tabs(['⚽ BUGÜNÜN MAÇLARI','📊 ANALİZ','🔎 ARŞİV'])
 with t1:
  st.subheader(today.strftime('%d.%m.%Y'))
  c1,c2,c3=st.columns(3)
- if c1.button('1 · MAÇLARI ÇEK',use_container_width=True):
-  try:st.success(f'{fetch_matches(today)} maç güncellendi');st.rerun()
+ if c1.button('1 · MAÇLARI + GÜNCEL ORANLARI ÇEK',use_container_width=True):
+  try:
+   nm=fetch_matches(today)
+   no,msg=attach_odds(today)
+   st.success(f'{nm} maç güncellendi • {no} güncel oran eşleşmesi işlendi • {msg}')
+   st.rerun()
   except Exception as e:st.error(str(e))
- if c2.button('2 · NESİNE + YEDEK ORANLARI BAĞLA',use_container_width=True):
-  n,msg=attach_odds(today);st.success(f'{n} oran eşleşmesi işlendi • {msg}') if n else st.warning('Oran kaynağı bu çalıştırmada veri vermedi. '+msg);st.rerun()
+ if c2.button('2 · ORANLARI ŞİMDİ YENİLE',use_container_width=True):
+  n,msg=attach_odds(today)
+  st.success(f'{n} güncel oran eşleşmesi işlendi • {msg}') if n else st.warning('Oran kaynağı bu çalıştırmada veri vermedi. Eski oranlar güncel diye gösterilmedi. '+msg)
+  st.rerun()
  if c3.button('3 · SONUÇLARI ARŞİVLE',use_container_width=True):
   try:fetch_matches(today)
   except:pass
@@ -172,14 +188,22 @@ with t1:
  else:
   a=int(d[['ms1','msx','ms2']].notna().all(axis=1).sum()); n_nesine=int(d.odds_source.fillna('').str.contains('Nesine',case=False).sum()); n_macko=int(d.odds_source.fillna('').str.contains('mackolik.com',case=False).sum())
   cA,cB,cC,cD=st.columns(4);cA.metric('Günün maçları',len(d));cB.metric('Analize hazır',a);cC.metric('Nesine',n_nesine);cD.metric('Yedek kaynak',n_macko)
+  if 'odds_updated_at' in d.columns and d.odds_updated_at.notna().any():
+   try:
+    last=pd.to_datetime(d.odds_updated_at.dropna()).max()
+    st.success(f'🟢 Oranlar son yenilendi: {last.strftime("%H:%M:%S")} • Butona her basışta kaynaklardan yeniden çekilir.')
+   except:pass
   q=st.text_input('🔎 Maç ara'); sh=d if not q else d[d.match_name.str.contains(q,case=False,na=False,regex=False)]
-  st.dataframe(sh[['time_tr','match_name','competition_name','state','ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok','iy05_alt','iy05_ust','iy15_alt','iy15_ust','odds_source']],use_container_width=True,hide_index=True)
+  st.dataframe(sh[['time_tr','match_name','competition_name','state','ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok','iy05_alt','iy05_ust','iy15_alt','iy15_ust','odds_source','odds_updated_at']],use_container_width=True,hide_index=True)
 with t2:
  d=load_daily(ds); ready=d[d[['ms1','msx','ms2']].notna().all(axis=1)] if not d.empty else d
  if ready.empty:st.warning('Henüz analiz edilecek doğrulanmış MS oranı yok.')
  else:
   labels=[f'{r.time_tr} • {r.match_name}' for _,r in ready.iterrows()];pick=st.selectbox('Maç seç',labels);r=ready.iloc[labels.index(pick)]
   st.markdown(f"### {r.match_name}");st.write(f"MS: **{r.ms1:.2f} / {r.msx:.2f} / {r.ms2:.2f}**")
+  if 'odds_updated_at' in ready.columns and pd.notna(r.odds_updated_at):
+   try:st.caption(f"🟢 Bu maçın oranları: {pd.to_datetime(r.odds_updated_at).strftime('%H:%M:%S')} tarihinde/saatinde yenilendi")
+   except:pass
   codd1,codd2,codd3=st.columns(3)
   codd1.write(f"**2.5 Gol**  ALT: {r.gol25_alt if pd.notna(r.gol25_alt) else '-'}  •  ÜST: {r.gol25_ust if pd.notna(r.gol25_ust) else '-'}")
   codd2.write(f"**İY 0.5**  ALT: {r.iy05_alt if pd.notna(r.iy05_alt) else '-'}  •  ÜST: {r.iy05_ust if pd.notna(r.iy05_ust) else '-'}")
@@ -204,3 +228,4 @@ with t2:
 with t3:
  q=st.text_input('Takım / maç ara',key='arc');
  if q:st.dataframe(DF[DF.Maç.str.contains(q,case=False,na=False,regex=False)][['date_iso','Saat','Maç','İY Skor','Maç Sonu','ms1','msx','ms2']].sort_values(['date_iso','Saat'],ascending=False).head(200),use_container_width=True,hide_index=True)
+  
