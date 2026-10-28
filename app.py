@@ -10,6 +10,7 @@ from difflib import SequenceMatcher
 st.set_page_config(page_title='Odds Data Lab',page_icon='⚽',layout='wide')
 DB=Path(__file__).with_name('ODDS_DATA_LAB_V1.db'); IST=ZoneInfo('Europe/Istanbul')
 LIVE='https://www.mackolik.com/perform/p0/ajax/components/competition/livescores/json?'
+NESINE='https://www.nesine.com/iddaa/futbol'
 PROGRAM_SOURCES=['https://arsiv.mackolik.com/Iddaa-Programi','https://arsiv2.mackolik.com/Iddaa-Programi']
 HEAD={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36','Accept-Language':'tr-TR,tr;q=0.9'}
 def db(): return sqlite3.connect(DB)
@@ -37,6 +38,44 @@ def fetch_matches(day):
  with db() as c:c.executemany('''INSERT INTO daily_matches(match_date,match_id,time_tr,match_name,home_team,away_team,competition_id,competition_name,state,status,ft_home,ft_away,ht_score,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(match_date,match_id) DO UPDATE SET time_tr=excluded.time_tr,match_name=excluded.match_name,home_team=excluded.home_team,away_team=excluded.away_team,competition_name=excluded.competition_name,state=excluded.state,status=excluded.status,ft_home=excluded.ft_home,ft_away=excluded.ft_away,ht_score=excluded.ht_score,updated_at=excluded.updated_at''',rows)
  return len(rows)
 
+def compact(s):
+ return re.sub(r'[^a-z0-9]+','',unicodedata.normalize('NFKD',str(s or '')).encode('ascii','ignore').decode().lower())
+
+def scrape_nesine(daily):
+ """Nesine public football bulletin. Match only when both team names are found in the same nearby text block."""
+ try:
+  r=requests.get(NESINE,headers={**HEAD,'Accept':'text/html,application/xhtml+xml'},timeout=30)
+  if r.status_code!=200 or len(r.text)<1000:return [],f'Nesine HTTP {r.status_code}'
+  soup=BeautifulSoup(r.text,'html.parser')
+  # Script/style noise makes proximity matching worse.
+  for x in soup(['script','style','noscript']):x.decompose()
+  txt=' '.join(soup.stripped_strings)
+  low=unicodedata.normalize('NFKD',txt).encode('ascii','ignore').decode().lower()
+  out=[]
+  for _,m in daily.iterrows():
+   h=unicodedata.normalize('NFKD',str(m.home_team)).encode('ascii','ignore').decode().lower().strip()
+   a=unicodedata.normalize('NFKD',str(m.away_team)).encode('ascii','ignore').decode().lower().strip()
+   if len(h)<3 or len(a)<3:continue
+   # Search a bounded neighborhood: prevents odds from a neighboring fixture being attached.
+   starts=[x.start() for x in re.finditer(re.escape(h),low)]
+   best=None
+   for p in starts:
+    lo=max(0,p-180); hi=min(len(low),p+650); block=low[lo:hi]
+    if a not in block:continue
+    # Nesine renders labels as MS 1 / MS X / MS 2 / 2,5 Alt / 2,5 Üst.
+    pats={
+     'ms1':r'ms\s*1\s*([0-9]+[\.,][0-9]+)',
+     'msx':r'ms\s*x\s*([0-9]+[\.,][0-9]+)',
+     'ms2':r'ms\s*2\s*([0-9]+[\.,][0-9]+)',
+     'gol25_alt':r'2\s*[,\.]?5\s*alt\s*([0-9]+[\.,][0-9]+)',
+     'gol25_ust':r'2\s*[,\.]?5\s*ust\s*([0-9]+[\.,][0-9]+)'}
+    vals={k:(fnum(mm.group(1)) if (mm:=re.search(pat,block,re.I)) else None) for k,pat in pats.items()}
+    if all(vals[k] is not None for k in ('ms1','msx','ms2')):
+     best=vals;break
+   if best:out.append({'match_id':m.match_id,**best,'source':NESINE})
+  return out,f'Nesine: {len(out)} eşleşme'
+ except Exception as e:return [],f'Nesine hata: {e}'
+
 def scrape_program():
  # Legacy public program page: MS 1-X-2 + 2.5 Alt/Üst + double chance are visible without opening match detail.
  last=''
@@ -63,19 +102,31 @@ def scrape_program():
  return [],last
 
 def attach_odds(day):
- odds,msg=scrape_program(); daily=load_daily(day.isoformat()); n=0
- if daily.empty or not odds:return 0,msg
+ daily=load_daily(day.isoformat())
+ if daily.empty:return 0,'Önce maçları çek.'
+ total=0; notes=[]
+ # 1) NESINE is primary.
+ nes, msg=scrape_nesine(daily);notes.append(msg)
  with db() as c:
-  for _,m in daily.iterrows():
-   best=None; bs=0
-   a=norm(m.match_name)
-   for o in odds:
-    s=SequenceMatcher(None,a,norm(o['name'])).ratio()
-    if m.time_tr and o['time']==m.time_tr:s+=.08
-    if s>bs:bs=s;best=o
-   if best and bs>=.72:
-    c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,odds_source=?,updated_at=? WHERE match_date=? AND match_id=?',(best['ms1'],best['msx'],best['ms2'],best['gol25_alt'],best['gol25_ust'],best['source'],datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),m.match_id));n+=1
- return n,msg
+  for o in nes:
+   c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,odds_source=?,updated_at=? WHERE match_date=? AND match_id=?',
+    (o['ms1'],o['msx'],o['ms2'],o['gol25_alt'],o['gol25_ust'],o['source'],datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),o['match_id']))
+   total+=1
+ # 2) Mackolik archive is fallback only for still-empty matches.
+ daily=load_daily(day.isoformat()); missing=daily[daily[['ms1','msx','ms2']].isna().any(axis=1)]
+ odds,msg2=scrape_program();notes.append(msg2)
+ if odds and not missing.empty:
+  with db() as c:
+   for _,m in missing.iterrows():
+    best=None;bs=0;a=norm(m.match_name)
+    for o in odds:
+     s=SequenceMatcher(None,a,norm(o['name'])).ratio()
+     if m.time_tr and o['time']==m.time_tr:s+=.08
+     if s>bs:bs=s;best=o
+    if best and bs>=.72:
+     c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,odds_source=?,updated_at=? WHERE match_date=? AND match_id=?',
+      (best['ms1'],best['msx'],best['ms2'],best['gol25_alt'],best['gol25_ust'],best['source'],datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),m.match_id));total+=1
+ return total,' | '.join(notes)
 
 def load_daily(ds):
  with db() as c:return pd.read_sql_query('SELECT * FROM daily_matches WHERE match_date=? ORDER BY time_tr,match_name',c,params=[ds])
@@ -87,7 +138,7 @@ def score(s):
 def prepared(d):
  d=d.copy();ft=d['Maç Sonu'].map(score);ht=d['İY Skor'].map(score)
  for n,f in {'MS 1':lambda x:x[0]>x[1],'MS X':lambda x:x[0]==x[1],'MS 2':lambda x:x[0]<x[1],'2.5 ÜST':lambda x:sum(x)>2,'2.5 ALT':lambda x:sum(x)<3,'KG VAR':lambda x:x[0]>0 and x[1]>0,'KG YOK':lambda x:not(x[0]>0 and x[1]>0)}.items():d[n]=ft.map(lambda x:int(bool(x) and f(x)))
- for n,f in {'İY 0.5 ÜST':lambda x:sum(x)>0,'İY 0.5 ALT':lambda x:sum(x)==0,'İY 1.5 ÜST':lambda x:sum(x)>1,'İY 1.5 ALT':lambda x:sum(x)<2,'İY 2.5 ÜST':lambda x:sum(x)>2,'İY 2.5 ALT':lambda x:sum(x)<3}.items():d[n]=ht.map(lambda x:int(bool(x) and f(x)))
+ for n,f in {'İY 0.5 ÜST':lambda x:sum(x)>0,'İY 0.5 ALT':lambda x:sum(x)==0,'İY 1.5 ÜST':lambda x:sum(x)>1,'İY 1.5 ALT':lambda x:sum(x)<2}.items():d[n]=ht.map(lambda x:int(bool(x) and f(x)))
  d['_ft']=ft.notna();d['_ht']=ht.notna();return d
 
 def archive_finished(day):
@@ -111,8 +162,8 @@ with t1:
  if c1.button('1 · MAÇLARI ÇEK',use_container_width=True):
   try:st.success(f'{fetch_matches(today)} maç güncellendi');st.rerun()
   except Exception as e:st.error(str(e))
- if c2.button('2 · İDDAA ORANLARINI BAĞLA',use_container_width=True):
-  n,msg=attach_odds(today);st.success(f'{n} maça oran bağlandı') if n else st.warning('Oran kaynağı bu çalıştırmada veri vermedi. '+msg);st.rerun()
+ if c2.button('2 · NESİNE + YEDEK ORANLARI BAĞLA',use_container_width=True):
+  n,msg=attach_odds(today);st.success(f'{n} oran eşleşmesi işlendi • {msg}') if n else st.warning('Oran kaynağı bu çalıştırmada veri vermedi. '+msg);st.rerun()
  if c3.button('3 · SONUÇLARI ARŞİVLE',use_container_width=True):
   try:fetch_matches(today)
   except:pass
@@ -120,7 +171,8 @@ with t1:
  d=load_daily(ds)
  if d.empty:st.info('Önce MAÇLARI ÇEK.')
  else:
-  st.metric('Günün maçları',len(d));st.metric('MS oranı hazır',int(d[['ms1','msx','ms2']].notna().all(axis=1).sum()))
+  a=int(d[['ms1','msx','ms2']].notna().all(axis=1).sum()); n_nesine=int(d.odds_source.fillna('').str.contains('nesine.com',case=False).sum()); n_macko=int(d.odds_source.fillna('').str.contains('mackolik.com',case=False).sum())
+  cA,cB,cC,cD=st.columns(4);cA.metric('Günün maçları',len(d));cB.metric('Analize hazır',a);cC.metric('Nesine',n_nesine);cD.metric('Yedek kaynak',n_macko)
   q=st.text_input('🔎 Maç ara'); sh=d if not q else d[d.match_name.str.contains(q,case=False,na=False,regex=False)]
   st.dataframe(sh[['time_tr','match_name','competition_name','state','ms1','msx','ms2','gol25_alt','gol25_ust','odds_source']],use_container_width=True,hide_index=True)
 with t2:
@@ -131,7 +183,7 @@ with t2:
   st.markdown(f"### {r.match_name}");st.write(f"MS: **{r.ms1:.2f} / {r.msx:.2f} / {r.ms2:.2f}**")
   tol=.05;m=DF.ms1.notna()&DF.msx.notna()&DF.ms2.notna()&(DF.ms1-r.ms1).abs().le(tol)&(DF.msx-r.msx).abs().le(tol)&(DF.ms2-r.ms2).abs().le(tol);s=DF[m];st.metric('Benzer geçmiş maç',len(s))
   rr=[]
-  for n,base in [(x,s[s._ft]) for x in ['MS 1','MS X','MS 2','2.5 ÜST','2.5 ALT','KG VAR','KG YOK']]+[(x,s[s._ht]) for x in ['İY 0.5 ÜST','İY 0.5 ALT','İY 1.5 ÜST','İY 1.5 ALT','İY 2.5 ÜST','İY 2.5 ALT']]:
+  for n,base in [(x,s[s._ft]) for x in ['MS 1','MS X','MS 2','2.5 ÜST','2.5 ALT','KG VAR','KG YOK']]+[(x,s[s._ht]) for x in ['İY 0.5 ÜST','İY 0.5 ALT','İY 1.5 ÜST','İY 1.5 ALT']]:
    N=len(base);h=int(base[n].sum()) if N else 0;rr.append([n,h,N,round(100*h/N,1) if N else None])
   st.dataframe(pd.DataFrame(rr,columns=['İstatistik','Başarılı','Örnek','Yüzde %']).sort_values('Yüzde %',ascending=False),use_container_width=True,hide_index=True)
   st.dataframe(s[['date_iso','Saat','Maç','İY Skor','Maç Sonu','ms1','msx','ms2']].sort_values(['date_iso','Saat'],ascending=False).head(100),use_container_width=True,hide_index=True)
