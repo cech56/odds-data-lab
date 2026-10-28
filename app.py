@@ -7,6 +7,13 @@ from bs4 import BeautifulSoup
 import streamlit as st
 from difflib import SequenceMatcher
 
+
+# Eski SQLite veritabanini yeni guncel-oran surumuyle uyumlu hale getir.
+with db() as c:
+ existing_cols={row[1] for row in c.execute("PRAGMA table_info(daily_matches)").fetchall()}
+ if 'odds_updated_at' not in existing_cols:
+  c.execute("ALTER TABLE daily_matches ADD COLUMN odds_updated_at TEXT")
+
 st.set_page_config(page_title='Odds Data Lab',page_icon='⚽',layout='wide')
 DB=Path(__file__).with_name('ODDS_DATA_LAB_V1.db'); IST=ZoneInfo('Europe/Istanbul')
 LIVE='https://www.mackolik.com/perform/p0/ajax/components/competition/livescores/json?'
@@ -236,4 +243,4 @@ with t2:
 with t3:
  q=st.text_input('Takım / maç ara',key='arc');
  if q:st.dataframe(DF[DF.Maç.str.contains(q,case=False,na=False,regex=False)][['date_iso','Saat','Maç','İY Skor','Maç Sonu','ms1','msx','ms2']].sort_values(['date_iso','Saat'],ascending=False).head(200),use_container_width=True,hide_index=True)
-  
+   
