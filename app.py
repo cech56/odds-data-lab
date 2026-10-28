@@ -22,7 +22,7 @@ def fnum(x):
 def init():
  with db() as c:
   c.execute('''CREATE TABLE IF NOT EXISTS daily_matches(match_date TEXT,match_id TEXT,time_tr TEXT,match_name TEXT,home_team TEXT,away_team TEXT,competition_id TEXT,competition_name TEXT,state TEXT,status TEXT,ft_home TEXT,ft_away TEXT,ht_score TEXT,ms1 REAL,msx REAL,ms2 REAL,kg_var REAL,kg_yok REAL,gol25_alt REAL,gol25_ust REAL,iy_ms1 REAL,iy_msx REAL,iy_ms2 REAL,odds_source TEXT,updated_at TEXT,archived INTEGER DEFAULT 0,PRIMARY KEY(match_date,match_id))''')
-  for col,typ in [('odds_source','TEXT'),('archived','INTEGER DEFAULT 0')]:
+  for col,typ in [('odds_source','TEXT'),('archived','INTEGER DEFAULT 0'),('iy05_alt','REAL'),('iy05_ust','REAL'),('iy15_alt','REAL'),('iy15_ust','REAL')]:
    try:c.execute(f'ALTER TABLE daily_matches ADD COLUMN {col} {typ}')
    except:pass
 
@@ -51,7 +51,7 @@ def scrape_nesine(daily, day):
    if e.get('TYPE')!=1 or e.get('GT')!=1 or not e.get('HN') or not e.get('AN') or e.get('D')!=nesine_day:continue
    markets=e.get('MA',[]) or []
    if not any(mk.get('MTID')==1 for mk in markets):continue
-   o={'home':e.get('HN',''),'away':e.get('AN',''),'time':str(e.get('T') or '')[:5],'ms1':None,'msx':None,'ms2':None,'gol25_alt':None,'gol25_ust':None,'kg_var':None,'kg_yok':None}
+   o={'home':e.get('HN',''),'away':e.get('AN',''),'time':str(e.get('T') or '')[:5],'ms1':None,'msx':None,'ms2':None,'gol25_alt':None,'gol25_ust':None,'kg_var':None,'kg_yok':None,'iy05_alt':None,'iy05_ust':None,'iy15_alt':None,'iy15_ust':None}
    for mk in markets:
     vals={x.get('N'):fnum(x.get('O')) for x in (mk.get('OCA') or [])}; mtid=mk.get('MTID')
     try:sov=float(mk.get('SOV') or 0)
@@ -59,6 +59,8 @@ def scrape_nesine(daily, day):
     if mtid==1:o['ms1'],o['msx'],o['ms2']=vals.get(1),vals.get(2),vals.get(3)
     elif mtid==12 and abs(sov-2.5)<.001:o['gol25_alt'],o['gol25_ust']=vals.get(1),vals.get(2)
     elif mtid==38:o['kg_var'],o['kg_yok']=vals.get(1),vals.get(2)
+    elif mtid==256 and abs(sov-.5)<.001:o['iy05_alt'],o['iy05_ust']=vals.get(1),vals.get(2)
+    elif mtid==20 and abs(sov-1.5)<.001:o['iy15_alt'],o['iy15_ust']=vals.get(1),vals.get(2)
    if all(o[k] is not None for k in ('ms1','msx','ms2')):parsed.append(o)
   out=[]; used=set()
   for _,m in daily.iterrows():
@@ -69,7 +71,7 @@ def scrape_nesine(daily, day):
     if m.time_tr and o['time']==m.time_tr:sc+=.08
     if sc>bs:bs=sc;best=(i,o)
    if best and bs>=.78:
-    i,o=best;used.add(i);out.append({'match_id':m.match_id,**{k:o[k] for k in ('ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok')},'source':'Nesine Bulten API'})
+    i,o=best;used.add(i);out.append({'match_id':m.match_id,**{k:o[k] for k in ('ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok','iy05_alt','iy05_ust','iy15_alt','iy15_ust')},'source':'Nesine Bulten API'})
   return out,f'Nesine API {nesine_day}: {len(parsed)} gercek mac / {len(out)} eslesme'
  except Exception as e:return [],f'Nesine API hata: {e}'
 
@@ -106,8 +108,8 @@ def attach_odds(day):
  nes, msg=scrape_nesine(daily,day);notes.append(msg)
  with db() as c:
   for o in nes:
-   c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,kg_var=?,kg_yok=?,odds_source=?,updated_at=? WHERE match_date=? AND match_id=?',
-     (o['ms1'],o['msx'],o['ms2'],o['gol25_alt'],o['gol25_ust'],o['kg_var'],o['kg_yok'],o['source'],datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),o['match_id']))
+   c.execute('UPDATE daily_matches SET ms1=?,msx=?,ms2=?,gol25_alt=?,gol25_ust=?,kg_var=?,kg_yok=?,iy05_alt=?,iy05_ust=?,iy15_alt=?,iy15_ust=?,odds_source=?,updated_at=? WHERE match_date=? AND match_id=?',
+     (o['ms1'],o['msx'],o['ms2'],o['gol25_alt'],o['gol25_ust'],o['kg_var'],o['kg_yok'],o['iy05_alt'],o['iy05_ust'],o['iy15_alt'],o['iy15_ust'],o['source'],datetime.now(IST).isoformat(timespec='seconds'),day.isoformat(),o['match_id']))
    total+=1
  # 2) Mackolik archive is fallback only for still-empty matches.
  daily=load_daily(day.isoformat()); missing=daily[daily[['ms1','msx','ms2']].isna().any(axis=1)]
@@ -141,12 +143,12 @@ def prepared(d):
 def archive_finished(day):
  ds=day.isoformat(); n=0
  with db() as c:
-  rows=c.execute('SELECT match_id,time_tr,match_name,ht_score,ft_home,ft_away,ms1,msx,ms2,kg_var,kg_yok,gol25_alt,gol25_ust,iy_ms1,iy_msx,iy_ms2 FROM daily_matches WHERE match_date=? AND state="post" AND archived=0 AND ms1 IS NOT NULL AND msx IS NOT NULL AND ms2 IS NOT NULL',[ds]).fetchall()
+  rows=c.execute('SELECT match_id,time_tr,match_name,ht_score,ft_home,ft_away,ms1,msx,ms2,kg_var,kg_yok,gol25_alt,gol25_ust,iy_ms1,iy_msx,iy_ms2,iy05_alt,iy05_ust,iy15_alt,iy15_ust FROM daily_matches WHERE match_date=? AND state="post" AND archived=0 AND ms1 IS NOT NULL AND msx IS NOT NULL AND ms2 IS NOT NULL',[ds]).fetchall()
   for r in rows:
    mid,tm,name,ht,fh,fa,*o=r
    if not(str(fh).isdigit() and str(fa).isdigit() and score(ht)):continue
-   vals={'Tarih':day.strftime('%d-%m-%Y'),'Saat':tm,'Maç':name,'İY Skor':ht,'Maç Sonu':f'{fh}-{fa}','MS 1':o[0],'MS X':o[1],'MS 2':o[2],'KG Var':o[3],'KG Yok':o[4],'Gol 2,5 Alt':o[5],'Gol 2,5 Üst':o[6],'İY MS 1':o[7],'İY MS X':o[8],'İY MS 2':o[9]}
-   cols=list(vals)+['date_iso','ms1','msx','ms2','kg_var','kg_yok','gol25_alt','gol25_ust','iy_ms1','iy_msx','iy_ms2']; vv=list(vals.values())+[ds]+o
+   vals={'Tarih':day.strftime('%d-%m-%Y'),'Saat':tm,'Maç':name,'İY Skor':ht,'Maç Sonu':f'{fh}-{fa}','MS 1':o[0],'MS X':o[1],'MS 2':o[2],'KG Var':o[3],'KG Yok':o[4],'Gol 2,5 Alt':o[5],'Gol 2,5 Üst':o[6],'İY MS 1':o[7],'İY MS X':o[8],'İY MS 2':o[9],'İY Gol 0,5 Alt':o[10],'İY Gol 0,5 Üst':o[11],'İY Gol 1,5 Alt':o[12],'İY Gol 1,5 Üst':o[13]}
+   cols=list(vals)+['date_iso','ms1','msx','ms2','kg_var','kg_yok','gol25_alt','gol25_ust','iy_ms1','iy_msx','iy_ms2']; vv=list(vals.values())+[ds]+o[:10]
    c.execute('INSERT INTO matches('+','.join('"'+x+'"' for x in cols)+') VALUES('+','.join('?'*len(cols))+')',vv);c.execute('UPDATE daily_matches SET archived=1 WHERE match_date=? AND match_id=?',[ds,mid]);n+=1
  return n
 
@@ -171,13 +173,17 @@ with t1:
   a=int(d[['ms1','msx','ms2']].notna().all(axis=1).sum()); n_nesine=int(d.odds_source.fillna('').str.contains('Nesine',case=False).sum()); n_macko=int(d.odds_source.fillna('').str.contains('mackolik.com',case=False).sum())
   cA,cB,cC,cD=st.columns(4);cA.metric('Günün maçları',len(d));cB.metric('Analize hazır',a);cC.metric('Nesine',n_nesine);cD.metric('Yedek kaynak',n_macko)
   q=st.text_input('🔎 Maç ara'); sh=d if not q else d[d.match_name.str.contains(q,case=False,na=False,regex=False)]
-  st.dataframe(sh[['time_tr','match_name','competition_name','state','ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok','odds_source']],use_container_width=True,hide_index=True)
+  st.dataframe(sh[['time_tr','match_name','competition_name','state','ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok','iy05_alt','iy05_ust','iy15_alt','iy15_ust','odds_source']],use_container_width=True,hide_index=True)
 with t2:
  d=load_daily(ds); ready=d[d[['ms1','msx','ms2']].notna().all(axis=1)] if not d.empty else d
  if ready.empty:st.warning('Henüz analiz edilecek doğrulanmış MS oranı yok.')
  else:
   labels=[f'{r.time_tr} • {r.match_name}' for _,r in ready.iterrows()];pick=st.selectbox('Maç seç',labels);r=ready.iloc[labels.index(pick)]
   st.markdown(f"### {r.match_name}");st.write(f"MS: **{r.ms1:.2f} / {r.msx:.2f} / {r.ms2:.2f}**")
+  codd1,codd2,codd3=st.columns(3)
+  codd1.write(f"**2.5 Gol**  ALT: {r.gol25_alt if pd.notna(r.gol25_alt) else '-'}  •  ÜST: {r.gol25_ust if pd.notna(r.gol25_ust) else '-'}")
+  codd2.write(f"**İY 0.5**  ALT: {r.iy05_alt if pd.notna(r.iy05_alt) else '-'}  •  ÜST: {r.iy05_ust if pd.notna(r.iy05_ust) else '-'}")
+  codd3.write(f"**İY 1.5**  ALT: {r.iy15_alt if pd.notna(r.iy15_alt) else '-'}  •  ÜST: {r.iy15_ust if pd.notna(r.iy15_ust) else '-'}")
   # Kademeli tolerans: ±0.05'ten başla; en az 10 benzer maç bulunana kadar genişlet.
   # Bir adımda 10'u aşarsa o adımda bulunan tüm maçları kullan.
   tolerances=[.05,.07,.10,.15,.20,.25,.30,.40,.50,1.00]
