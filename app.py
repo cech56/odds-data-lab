@@ -194,9 +194,17 @@ with t1:
     st.success(f'🟢 Oranlar son yenilendi: {last.strftime("%H:%M:%S")} • Butona her basışta kaynaklardan yeniden çekilir.')
    except:pass
   q=st.text_input('🔎 Maç ara'); sh=d if not q else d[d.match_name.str.contains(q,case=False,na=False,regex=False)]
-  st.dataframe(sh[['time_tr','match_name','competition_name','state','ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok','iy05_alt','iy05_ust','iy15_alt','iy15_ust','odds_source','odds_updated_at']],use_container_width=True,hide_index=True)
+  table_cols=['time_tr','match_name','competition_name','state','ms1','msx','ms2','gol25_alt','gol25_ust','kg_var','kg_yok','iy05_alt','iy05_ust','iy15_alt','iy15_ust','odds_source','odds_updated_at']
+  for col in table_cols:
+   if col not in sh.columns: sh[col]=None
+  st.dataframe(sh[table_cols],use_container_width=True,hide_index=True)
 with t2:
- d=load_daily(ds); ready=d[d[['ms1','msx','ms2']].notna().all(axis=1)] if not d.empty else d
+ d=load_daily(ds)
+ if not d.empty:
+  for col in ['iy05_alt','iy05_ust','iy15_alt','iy15_ust','odds_updated_at']:
+   if col not in d.columns: d[col]=None
+  ready=d[d[['ms1','msx','ms2']].notna().all(axis=1)]
+ else: ready=d
  if ready.empty:st.warning('Henüz analiz edilecek doğrulanmış MS oranı yok.')
  else:
   labels=[f'{r.time_tr} • {r.match_name}' for _,r in ready.iterrows()];pick=st.selectbox('Maç seç',labels);r=ready.iloc[labels.index(pick)]
