@@ -7,13 +7,6 @@ from bs4 import BeautifulSoup
 import streamlit as st
 from difflib import SequenceMatcher
 
-
-# Eski SQLite veritabanini yeni guncel-oran surumuyle uyumlu hale getir.
-with db() as c:
- existing_cols={row[1] for row in c.execute("PRAGMA table_info(daily_matches)").fetchall()}
- if 'odds_updated_at' not in existing_cols:
-  c.execute("ALTER TABLE daily_matches ADD COLUMN odds_updated_at TEXT")
-
 st.set_page_config(page_title='Odds Data Lab',page_icon='⚽',layout='wide')
 DB=Path(__file__).with_name('ODDS_DATA_LAB_V1.db'); IST=ZoneInfo('Europe/Istanbul')
 LIVE='https://www.mackolik.com/perform/p0/ajax/components/competition/livescores/json?'
@@ -29,7 +22,7 @@ def fnum(x):
 def init():
  with db() as c:
   c.execute('''CREATE TABLE IF NOT EXISTS daily_matches(match_date TEXT,match_id TEXT,time_tr TEXT,match_name TEXT,home_team TEXT,away_team TEXT,competition_id TEXT,competition_name TEXT,state TEXT,status TEXT,ft_home TEXT,ft_away TEXT,ht_score TEXT,ms1 REAL,msx REAL,ms2 REAL,kg_var REAL,kg_yok REAL,gol25_alt REAL,gol25_ust REAL,iy_ms1 REAL,iy_msx REAL,iy_ms2 REAL,odds_source TEXT,updated_at TEXT,archived INTEGER DEFAULT 0,PRIMARY KEY(match_date,match_id))''')
-  for col,typ in [('odds_source','TEXT'),('archived','INTEGER DEFAULT 0'),('iy05_alt','REAL'),('iy05_ust','REAL'),('iy15_alt','REAL'),('iy15_ust','REAL')]:
+  for col,typ in [('odds_source','TEXT'),('archived','INTEGER DEFAULT 0'),('iy05_alt','REAL'),('iy05_ust','REAL'),('iy15_alt','REAL'),('iy15_ust','REAL'),('odds_updated_at','TEXT')]:
    try:c.execute(f'ALTER TABLE daily_matches ADD COLUMN {col} {typ}')
    except:pass
 
@@ -243,4 +236,4 @@ with t2:
 with t3:
  q=st.text_input('Takım / maç ara',key='arc');
  if q:st.dataframe(DF[DF.Maç.str.contains(q,case=False,na=False,regex=False)][['date_iso','Saat','Maç','İY Skor','Maç Sonu','ms1','msx','ms2']].sort_values(['date_iso','Saat'],ascending=False).head(200),use_container_width=True,hide_index=True)
-   
+                                                                               
