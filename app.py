@@ -163,22 +163,21 @@ def archive_finished(day):
  return n
 
 
-def find_similar_matches(current, historical):
-    """MS1 toleranslı, 2.5 ÜST oranı birebir aynı geçmiş maçları bulur."""
+def find_similar_matches(current, historical, reference='ms1'):
+    """Secilen MS oraninda toleransli, 2.5 UST oraninda birebir eslesen maclari bulur."""
     tolerances=[.05,.07,.10,.15,.20,.25,.30,.40,.50,1.00]
     empty=historical.iloc[0:0].copy()
-    if pd.isna(current.get('ms1')) or pd.isna(current.get('gol25_ust')):
+    if pd.isna(current.get(reference)) or pd.isna(current.get('gol25_ust')):
         return empty, None
 
-    # 2.5 ÜST oranında tolerans yok: ekranda gösterilen iki ondalık değer aynı olmalı.
     same_over=(historical.gol25_ust.notna()
                &historical.gol25_ust.round(2).eq(round(float(current.gol25_ust),2)))
-    valid=same_over & historical.ms1.notna()
+    valid=same_over & historical[reference].notna()
 
     s=empty
     tol=None
     for current_tol in tolerances:
-        m=valid & (historical.ms1-float(current.ms1)).abs().le(current_tol)
+        m=valid & (historical[reference]-float(current[reference])).abs().le(current_tol)
         s=historical[m]
         tol=current_tol
         if len(s)>=5:
@@ -187,67 +186,52 @@ def find_similar_matches(current, historical):
 
 
 def strong_analyses(ready, historical, threshold=75.0):
-    """MS1 toleransı ve birebir aynı 2.5 ÜST oranıyla eşleşen maçların sonuçlarını tarar."""
-    markets_ft=['MS 1','MS X','MS 2','2.5 ÜST','2.5 ALT','KG VAR','KG YOK']
-    markets_ht=['İY 0.5 ÜST','İY 0.5 ALT','İY 1.5 ÜST','İY 1.5 ALT']
+    """MS1 ve MS2 ayri arastirilir; yalnizca ikisi de 2.5 UST'i desteklerse listelenir."""
     results=[]
-
     for _,r in ready.iterrows():
-        s,tol=find_similar_matches(r,historical)
-        if len(s)<5:
+        if pd.isna(r.get('ms1')) or pd.isna(r.get('ms2')) or pd.isna(r.get('gol25_ust')):
             continue
 
-        for market in markets_ft:
-            base=s[s._ft]
-            N=len(base)
-            if not N:
-                continue
-            hits=int(base[market].sum())
-            pct=round(100*hits/N,1)
-            if pct>=threshold:
-                results.append({
-                    'Saat':r.time_tr,
-                    'Maç':r.match_name,
-                    'Lig':r.competition_name,
-                    'Seçenek':market,
-                    'Yüzde %':pct,
-                    'Başarılı':hits,
-                    'Örnek':N,
-                    'Tolerans':f'±{tol:.2f}',
-                    'MS1':r.ms1,
-                    '2.5 ÜST':r.gol25_ust
-                })
+        sample1,tol1=find_similar_matches(r,historical,'ms1')
+        sample2,tol2=find_similar_matches(r,historical,'ms2')
 
-        for market in markets_ht:
-            base=s[s._ht]
-            N=len(base)
-            if not N:
-                continue
-            hits=int(base[market].sum())
-            pct=round(100*hits/N,1)
-            if pct>=threshold:
-                results.append({
-                    'Saat':r.time_tr,
-                    'Maç':r.match_name,
-                    'Lig':r.competition_name,
-                    'Seçenek':market,
-                    'Yüzde %':pct,
-                    'Başarılı':hits,
-                    'Örnek':N,
-                    'Tolerans':f'±{tol:.2f}',
-                    'MS1':r.ms1,
-                    '2.5 ÜST':r.gol25_ust
-                })
+        # Her iki arastirmada da en az 5 tamamlanmis mac olmali.
+        ft1=sample1[sample1._ft] if not sample1.empty else sample1
+        ft2=sample2[sample2._ft] if not sample2.empty else sample2
+        n1,n2=len(ft1),len(ft2)
+        if n1<5 or n2<5:
+            continue
 
+        hits1=int(ft1['2.5 ÜST'].sum())
+        hits2=int(ft2['2.5 ÜST'].sum())
+        pct1=round(100*hits1/n1,1)
+        pct2=round(100*hits2/n2,1)
+
+        # Iki bagimsiz arastirma da ayni secenegi %75+ desteklemeli.
+        if pct1>=threshold and pct2>=threshold:
+            results.append({
+                'Saat':r.time_tr,
+                'Maç':r.match_name,
+                'Lig':r.competition_name,
+                'Seçenek':'2.5 ÜST',
+                'MS1 Araştırması %':pct1,
+                'MS1 Başarılı/Örnek':f'{hits1}/{n1}',
+                'MS1 Tolerans':f'±{tol1:.2f}',
+                'MS2 Araştırması %':pct2,
+                'MS2 Başarılı/Örnek':f'{hits2}/{n2}',
+                'MS2 Tolerans':f'±{tol2:.2f}',
+                'MS1':r.ms1,
+                'MS2':r.ms2,
+                '2.5 ÜST':r.gol25_ust
+            })
+
+    columns=['Saat','Maç','Lig','Seçenek','MS1 Araştırması %',
+             'MS1 Başarılı/Örnek','MS1 Tolerans','MS2 Araştırması %',
+             'MS2 Başarılı/Örnek','MS2 Tolerans','MS1','MS2','2.5 ÜST']
     if not results:
-        return pd.DataFrame(columns=[
-            'Saat','Maç','Lig','Seçenek','Yüzde %','Başarılı',
-            'Örnek','Tolerans','MS1','2.5 ÜST'
-        ])
-
-    out=pd.DataFrame(results)
-    return out.sort_values(
-        ['Yüzde %','Örnek','Saat'],
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(results).sort_values(
+        ['MS1 Araştırması %','MS2 Araştırması %','Saat'],
         ascending=[False,False,True]
     ).reset_index(drop=True)
 
@@ -295,7 +279,7 @@ with t2:
   ready=d[d[['ms1','gol25_ust']].notna().all(axis=1)]
  else:ready=d
  st.subheader('🔥 GÜNÜN GÜÇLÜ ANALİZLERİ')
- st.caption('Eşleşme yalnızca MS 1 oranı (kademeli tolerans) ve birebir aynı 2.5 ÜST oranıyla yapılır. En az 5 benzer geçmiş maç ve %75+ tarihsel başarı şartı uygulanır.')
+ st.caption('İki bağımsız araştırma yapılır: MS 1 toleranslı + birebir 2.5 ÜST ve MS 2 toleranslı + birebir 2.5 ÜST. Her iki araştırmada da en az 5 geçmiş maç ve %75+ 2.5 ÜST başarısı şarttır.')
  if ready.empty:
   st.warning('Henüz taranacak doğrulanmış güncel oran yok. Önce BUGÜNÜN MAÇLARI sekmesinden maçları ve oranları çek.')
  else:
@@ -310,21 +294,8 @@ with t2:
    st.info('Bugün %75 ve üzeri tarihsel başarı gösteren seçenek bulunamadı.')
   else:
    st.success(f'🔥 {unique_matches} maçta toplam {len(strong)} adet %75+ seçenek bulundu.')
-   # Mobil ekranda yatay kaydırma kaynaklı başlık/satır hizalama sorununu önlemek
-   # için geniş tablo yerine her güçlü seçeneği dikey kart olarak göster.
-   for _, item in strong.iterrows():
-    with st.container(border=True):
-     st.markdown(f"**{item['Saat']} · {item['Maç']}**")
-     st.markdown(f"**{item['Seçenek']} — %{item['Yüzde %']}**")
-     st.caption(
-      f"Lig: {item['Lig']} · Başarılı: {item['Başarılı']}/{item['Örnek']} "
-      f"· Tolerans: {item['Tolerans']}"
-     )
-     st.caption(
-      f"Eşleşme oranları: MS 1 {item['MS1']:.2f} · "
-      f"2.5 ÜST {item['2.5 ÜST']:.2f} (2.5 ÜST'te tolerans yok)"
-     )
-   st.caption('Not: Geçmiş maç eşleşmesi yalnızca MS 1 toleransı ve birebir aynı 2.5 ÜST oranıyla yapılır. Yüzdeler tarihsel sonuçlardır; kesin sonuç garantisi değildir.')
+   st.dataframe(strong,use_container_width=True,hide_index=True)
+   st.caption('Listeye yalnızca MS 1 araştırması ve MS 2 araştırması ayrı ayrı %75+ 2.5 ÜST sonucu verdiğinde maç eklenir. Her iki araştırmada 2.5 ÜST oranı birebir eşleştirilir; yalnızca MS oranında tolerans uygulanır. Tarihsel sonuçlar garanti değildir.')
 
 with t3:
  d=load_daily(ds)
