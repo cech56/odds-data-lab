@@ -194,7 +194,7 @@ def strong_analyses(ready, historical, threshold=75.0):
 
     for _,r in ready.iterrows():
         s,tol=find_similar_matches(r,historical)
-        if len(s)<10:
+        if len(s)<5:
             continue
 
         for market in markets_ft:
@@ -295,7 +295,7 @@ with t2:
   ready=d[d[['ms1','gol25_ust']].notna().all(axis=1)]
  else:ready=d
  st.subheader('🔥 GÜNÜN GÜÇLÜ ANALİZLERİ')
- st.caption('Eşleşme yalnızca MS 1 oranı (kademeli tolerans) ve birebir aynı 2.5 ÜST oranıyla yapılır. En az 10 benzer geçmiş maç ve %75+ tarihsel başarı şartı uygulanır.')
+ st.caption('Eşleşme yalnızca MS 1 oranı (kademeli tolerans) ve birebir aynı 2.5 ÜST oranıyla yapılır. En az 5 benzer geçmiş maç ve %75+ tarihsel başarı şartı uygulanır.')
  if ready.empty:
   st.warning('Henüz taranacak doğrulanmış güncel oran yok. Önce BUGÜNÜN MAÇLARI sekmesinden maçları ve oranları çek.')
  else:
@@ -318,7 +318,7 @@ with t2:
      st.markdown(f"**{item['Seçenek']} — %{item['Yüzde %']}**")
      st.caption(
       f"Lig: {item['Lig']} · Başarılı: {item['Başarılı']}/{item['Örnek']} "
-      f"· Tolerans: ±{item['Tolerans']:.2f}"
+      f"· Tolerans: {item['Tolerans']}"
      )
      st.caption(
       f"Eşleşme oranları: MS 1 {item['MS1']:.2f} · "
@@ -353,7 +353,7 @@ with t3:
    ctol1.metric('Benzer geçmiş maç',len(s))
    ctol2.metric('MS 1 toleransı',f'±{tol:.2f}' if tol is not None else '-')
    st.caption(f"2.5 ÜST eşleşmesi: birebir {r.gol25_ust:.2f} (tolerans yok)")
-   if len(s)<10:
+   if len(s)<5:
     st.warning('MS 1 toleransı en yüksek seviyeye çıkarıldı ancak aynı 2.5 ÜST oranıyla en az 5 geçmiş maç bulunamadı.')
    else:
     rr=[]
