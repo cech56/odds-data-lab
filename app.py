@@ -163,29 +163,37 @@ def archive_finished(day):
  return n
 
 
-def strong_analyses(ready, historical, threshold=75.0):
-    """Günün tüm analize hazır maçlarını tarar ve eşik üstü tarihsel sonuçları döndürür."""
+def find_similar_matches(current, historical):
+    """MS1 toleranslı, 2.5 ÜST oranı birebir aynı geçmiş maçları bulur."""
     tolerances=[.05,.07,.10,.15,.20,.25,.30,.40,.50,1.00]
+    empty=historical.iloc[0:0].copy()
+    if pd.isna(current.get('ms1')) or pd.isna(current.get('gol25_ust')):
+        return empty, None
+
+    # 2.5 ÜST oranında tolerans yok: ekranda gösterilen iki ondalık değer aynı olmalı.
+    same_over=(historical.gol25_ust.notna()
+               &historical.gol25_ust.round(2).eq(round(float(current.gol25_ust),2)))
+    valid=same_over & historical.ms1.notna()
+
+    s=empty
+    tol=None
+    for current_tol in tolerances:
+        m=valid & (historical.ms1-float(current.ms1)).abs().le(current_tol)
+        s=historical[m]
+        tol=current_tol
+        if len(s)>=5:
+            break
+    return s,tol
+
+
+def strong_analyses(ready, historical, threshold=75.0):
+    """MS1 toleransı ve birebir aynı 2.5 ÜST oranıyla eşleşen maçların sonuçlarını tarar."""
     markets_ft=['MS 1','MS X','MS 2','2.5 ÜST','2.5 ALT','KG VAR','KG YOK']
     markets_ht=['İY 0.5 ÜST','İY 0.5 ALT','İY 1.5 ÜST','İY 1.5 ALT']
     results=[]
-    valid=historical.ms1.notna()&historical.msx.notna()&historical.ms2.notna()
 
     for _,r in ready.iterrows():
-        s=historical.iloc[0:0].copy()
-        tol=tolerances[-1]
-
-        for current_tol in tolerances:
-            m=(valid
-               &(historical.ms1-r.ms1).abs().le(current_tol)
-               &(historical.msx-r.msx).abs().le(current_tol)
-               &(historical.ms2-r.ms2).abs().le(current_tol))
-            s=historical[m]
-            tol=current_tol
-            if len(s)>=10:
-                break
-
-        # Minimum 10 benzer maç bulunamayan güncel maçı güçlü analiz listesine alma.
+        s,tol=find_similar_matches(r,historical)
         if len(s)<10:
             continue
 
@@ -207,8 +215,7 @@ def strong_analyses(ready, historical, threshold=75.0):
                     'Örnek':N,
                     'Tolerans':f'±{tol:.2f}',
                     'MS1':r.ms1,
-                    'MSX':r.msx,
-                    'MS2':r.ms2
+                    '2.5 ÜST':r.gol25_ust
                 })
 
         for market in markets_ht:
@@ -229,14 +236,13 @@ def strong_analyses(ready, historical, threshold=75.0):
                     'Örnek':N,
                     'Tolerans':f'±{tol:.2f}',
                     'MS1':r.ms1,
-                    'MSX':r.msx,
-                    'MS2':r.ms2
+                    '2.5 ÜST':r.gol25_ust
                 })
 
     if not results:
         return pd.DataFrame(columns=[
             'Saat','Maç','Lig','Seçenek','Yüzde %','Başarılı',
-            'Örnek','Tolerans','MS1','MSX','MS2'
+            'Örnek','Tolerans','MS1','2.5 ÜST'
         ])
 
     out=pd.DataFrame(results)
@@ -286,10 +292,10 @@ with t2:
  if not d.empty:
   for col in ['iy05_alt','iy05_ust','iy15_alt','iy15_ust','odds_updated_at']:
    if col not in d.columns:d[col]=None
-  ready=d[d[['ms1','msx','ms2']].notna().all(axis=1)]
+  ready=d[d[['ms1','gol25_ust']].notna().all(axis=1)]
  else:ready=d
  st.subheader('🔥 GÜNÜN GÜÇLÜ ANALİZLERİ')
- st.caption('Günün analize hazır tüm maçları otomatik taranır. En az 10 benzer geçmiş maç ve %75+ tarihsel başarı şartı uygulanır.')
+ st.caption('Eşleşme yalnızca MS 1 oranı (kademeli tolerans) ve birebir aynı 2.5 ÜST oranıyla yapılır. En az 10 benzer geçmiş maç ve %75+ tarihsel başarı şartı uygulanır.')
  if ready.empty:
   st.warning('Henüz taranacak doğrulanmış güncel oran yok. Önce BUGÜNÜN MAÇLARI sekmesinden maçları ve oranları çek.')
  else:
@@ -304,19 +310,28 @@ with t2:
    st.info('Bugün %75 ve üzeri tarihsel başarı gösteren seçenek bulunamadı.')
   else:
    st.success(f'🔥 {unique_matches} maçta toplam {len(strong)} adet %75+ seçenek bulundu.')
-   st.dataframe(
-    strong[['Saat','Maç','Lig','Seçenek','Yüzde %','Başarılı','Örnek','Tolerans','MS1','MSX','MS2']],
-    use_container_width=True,
-    hide_index=True
-   )
-   st.caption('Not: Yüzdeler geçmişte benzer MS1/MSX/MS2 oranlarına sahip maçların gerçekleşen sonuçlarından hesaplanır; kesin sonuç garantisi değildir.')
+   # Mobil ekranda yatay kaydırma kaynaklı başlık/satır hizalama sorununu önlemek
+   # için geniş tablo yerine her güçlü seçeneği dikey kart olarak göster.
+   for _, item in strong.iterrows():
+    with st.container(border=True):
+     st.markdown(f"**{item['Saat']} · {item['Maç']}**")
+     st.markdown(f"**{item['Seçenek']} — %{item['Yüzde %']}**")
+     st.caption(
+      f"Lig: {item['Lig']} · Başarılı: {item['Başarılı']}/{item['Örnek']} "
+      f"· Tolerans: ±{item['Tolerans']:.2f}"
+     )
+     st.caption(
+      f"Eşleşme oranları: MS 1 {item['MS1']:.2f} · "
+      f"2.5 ÜST {item['2.5 ÜST']:.2f} (2.5 ÜST'te tolerans yok)"
+     )
+   st.caption('Not: Geçmiş maç eşleşmesi yalnızca MS 1 toleransı ve birebir aynı 2.5 ÜST oranıyla yapılır. Yüzdeler tarihsel sonuçlardır; kesin sonuç garantisi değildir.')
 
 with t3:
  d=load_daily(ds)
  if not d.empty:
   for col in ['iy05_alt','iy05_ust','iy15_alt','iy15_ust','odds_updated_at']:
    if col not in d.columns: d[col]=None
-  ready=d[d[['ms1','msx','ms2']].notna().all(axis=1)]
+  ready=d[d[['ms1','gol25_ust']].notna().all(axis=1)]
  else: ready=d
  if ready.empty:st.warning('Henüz analiz edilecek doğrulanmış MS oranı yok.')
  else:
@@ -329,23 +344,23 @@ with t3:
   codd1.write(f"**2.5 Gol**  ALT: {r.gol25_alt if pd.notna(r.gol25_alt) else '-'}  •  ÜST: {r.gol25_ust if pd.notna(r.gol25_ust) else '-'}")
   codd2.write(f"**İY 0.5**  ALT: {r.iy05_alt if pd.notna(r.iy05_alt) else '-'}  •  ÜST: {r.iy05_ust if pd.notna(r.iy05_ust) else '-'}")
   codd3.write(f"**İY 1.5**  ALT: {r.iy15_alt if pd.notna(r.iy15_alt) else '-'}  •  ÜST: {r.iy15_ust if pd.notna(r.iy15_ust) else '-'}")
-  # Kademeli tolerans: ±0.05'ten başla; en az 10 benzer maç bulunana kadar genişlet.
-  # Bir adımda 10'u aşarsa o adımda bulunan tüm maçları kullan.
-  tolerances=[.05,.07,.10,.15,.20,.25,.30,.40,.50,1.00]
-  s=DF.iloc[0:0].copy();tol=tolerances[-1]
-  valid=DF.ms1.notna()&DF.msx.notna()&DF.ms2.notna()
-  for current_tol in tolerances:
-   m=valid&(DF.ms1-r.ms1).abs().le(current_tol)&(DF.msx-r.msx).abs().le(current_tol)&(DF.ms2-r.ms2).abs().le(current_tol)
-   s=DF[m];tol=current_tol
-   if len(s)>=10:break
-  ctol1,ctol2=st.columns(2)
-  ctol1.metric('Benzer geçmiş maç',len(s))
-  ctol2.metric('Kullanılan tolerans',f'±{tol:.2f}')
-  rr=[]
-  for n,base in [(x,s[s._ft]) for x in ['MS 1','MS X','MS 2','2.5 ÜST','2.5 ALT','KG VAR','KG YOK']]+[(x,s[s._ht]) for x in ['İY 0.5 ÜST','İY 0.5 ALT','İY 1.5 ÜST','İY 1.5 ALT']]:
-   N=len(base);h=int(base[n].sum()) if N else 0;rr.append([n,h,N,round(100*h/N,1) if N else None])
-  st.dataframe(pd.DataFrame(rr,columns=['İstatistik','Başarılı','Örnek','Yüzde %']).sort_values('Yüzde %',ascending=False),use_container_width=True,hide_index=True)
-  st.dataframe(s[['date_iso','Saat','Maç','İY Skor','Maç Sonu','ms1','msx','ms2']].sort_values(['date_iso','Saat'],ascending=False).head(100),use_container_width=True,hide_index=True)
+  # Benzer maç filtresi: MS 1 kademeli toleranslı, 2.5 ÜST birebir aynı.
+  if pd.isna(r.gol25_ust):
+   st.warning('Bu maçta 2.5 ÜST oranı bulunmadığı için analiz yapılamıyor.')
+  else:
+   s,tol=find_similar_matches(r,DF)
+   ctol1,ctol2=st.columns(2)
+   ctol1.metric('Benzer geçmiş maç',len(s))
+   ctol2.metric('MS 1 toleransı',f'±{tol:.2f}' if tol is not None else '-')
+   st.caption(f"2.5 ÜST eşleşmesi: birebir {r.gol25_ust:.2f} (tolerans yok)")
+   if len(s)<10:
+    st.warning('MS 1 toleransı en yüksek seviyeye çıkarıldı ancak aynı 2.5 ÜST oranıyla en az 5 geçmiş maç bulunamadı.')
+   else:
+    rr=[]
+    for n,base in [(x,s[s._ft]) for x in ['MS 1','MS X','MS 2','2.5 ÜST','2.5 ALT','KG VAR','KG YOK']]+[(x,s[s._ht]) for x in ['İY 0.5 ÜST','İY 0.5 ALT','İY 1.5 ÜST','İY 1.5 ALT']]:
+     N=len(base);h=int(base[n].sum()) if N else 0;rr.append([n,h,N,round(100*h/N,1) if N else None])
+    st.dataframe(pd.DataFrame(rr,columns=['İstatistik','Başarılı','Örnek','Yüzde %']).sort_values('Yüzde %',ascending=False),use_container_width=True,hide_index=True)
+    st.dataframe(s[['date_iso','Saat','Maç','İY Skor','Maç Sonu','ms1','gol25_ust']].sort_values(['date_iso','Saat'],ascending=False).head(100),use_container_width=True,hide_index=True)
 with t4:
  q=st.text_input('Takım / maç ara',key='arc');
  if q:st.dataframe(DF[DF.Maç.str.contains(q,case=False,na=False,regex=False)][['date_iso','Saat','Maç','İY Skor','Maç Sonu','ms1','msx','ms2']].sort_values(['date_iso','Saat'],ascending=False).head(200),use_container_width=True,hide_index=True)
