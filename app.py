@@ -162,9 +162,92 @@ def archive_finished(day):
    c.execute('INSERT INTO matches('+','.join('"'+x+'"' for x in cols)+') VALUES('+','.join('?'*len(cols))+')',vv);c.execute('UPDATE daily_matches SET archived=1 WHERE match_date=? AND match_id=?',[ds,mid]);n+=1
  return n
 
+
+def strong_analyses(ready, historical, threshold=75.0):
+    """Günün tüm analize hazır maçlarını tarar ve eşik üstü tarihsel sonuçları döndürür."""
+    tolerances=[.05,.07,.10,.15,.20,.25,.30,.40,.50,1.00]
+    markets_ft=['MS 1','MS X','MS 2','2.5 ÜST','2.5 ALT','KG VAR','KG YOK']
+    markets_ht=['İY 0.5 ÜST','İY 0.5 ALT','İY 1.5 ÜST','İY 1.5 ALT']
+    results=[]
+    valid=historical.ms1.notna()&historical.msx.notna()&historical.ms2.notna()
+
+    for _,r in ready.iterrows():
+        s=historical.iloc[0:0].copy()
+        tol=tolerances[-1]
+
+        for current_tol in tolerances:
+            m=(valid
+               &(historical.ms1-r.ms1).abs().le(current_tol)
+               &(historical.msx-r.msx).abs().le(current_tol)
+               &(historical.ms2-r.ms2).abs().le(current_tol))
+            s=historical[m]
+            tol=current_tol
+            if len(s)>=10:
+                break
+
+        # Minimum 10 benzer maç bulunamayan güncel maçı güçlü analiz listesine alma.
+        if len(s)<10:
+            continue
+
+        for market in markets_ft:
+            base=s[s._ft]
+            N=len(base)
+            if not N:
+                continue
+            hits=int(base[market].sum())
+            pct=round(100*hits/N,1)
+            if pct>=threshold:
+                results.append({
+                    'Saat':r.time_tr,
+                    'Maç':r.match_name,
+                    'Lig':r.competition_name,
+                    'Seçenek':market,
+                    'Yüzde %':pct,
+                    'Başarılı':hits,
+                    'Örnek':N,
+                    'Tolerans':f'±{tol:.2f}',
+                    'MS1':r.ms1,
+                    'MSX':r.msx,
+                    'MS2':r.ms2
+                })
+
+        for market in markets_ht:
+            base=s[s._ht]
+            N=len(base)
+            if not N:
+                continue
+            hits=int(base[market].sum())
+            pct=round(100*hits/N,1)
+            if pct>=threshold:
+                results.append({
+                    'Saat':r.time_tr,
+                    'Maç':r.match_name,
+                    'Lig':r.competition_name,
+                    'Seçenek':market,
+                    'Yüzde %':pct,
+                    'Başarılı':hits,
+                    'Örnek':N,
+                    'Tolerans':f'±{tol:.2f}',
+                    'MS1':r.ms1,
+                    'MSX':r.msx,
+                    'MS2':r.ms2
+                })
+
+    if not results:
+        return pd.DataFrame(columns=[
+            'Saat','Maç','Lig','Seçenek','Yüzde %','Başarılı',
+            'Örnek','Tolerans','MS1','MSX','MS2'
+        ])
+
+    out=pd.DataFrame(results)
+    return out.sort_values(
+        ['Yüzde %','Örnek','Saat'],
+        ascending=[False,False,True]
+    ).reset_index(drop=True)
+
 init(); DF=prepared(archive()); today=datetime.now(IST).date(); ds=today.isoformat()
 st.title('ODDS DATA LAB');st.caption(f'{len(DF):,} geçmiş maç • Otomatik günlük maç + doğrulanmış oran + sonuç arşivleme')
-t1,t2,t3=st.tabs(['⚽ BUGÜNÜN MAÇLARI','📊 ANALİZ','🔎 ARŞİV'])
+t1,t2,t3,t4=st.tabs(['⚽ BUGÜNÜN MAÇLARI','🔥 GÜÇLÜ ANALİZLER','📊 ANALİZ','🔎 ARŞİV'])
 with t1:
  st.subheader(today.strftime('%d.%m.%Y'))
  c1,c2,c3=st.columns(3)
@@ -202,6 +285,36 @@ with t2:
  d=load_daily(ds)
  if not d.empty:
   for col in ['iy05_alt','iy05_ust','iy15_alt','iy15_ust','odds_updated_at']:
+   if col not in d.columns:d[col]=None
+  ready=d[d[['ms1','msx','ms2']].notna().all(axis=1)]
+ else:ready=d
+ st.subheader('🔥 GÜNÜN GÜÇLÜ ANALİZLERİ')
+ st.caption('Günün analize hazır tüm maçları otomatik taranır. En az 10 benzer geçmiş maç ve %75+ tarihsel başarı şartı uygulanır.')
+ if ready.empty:
+  st.warning('Henüz taranacak doğrulanmış güncel oran yok. Önce BUGÜNÜN MAÇLARI sekmesinden maçları ve oranları çek.')
+ else:
+  with st.spinner(f'{len(ready)} maç otomatik taranıyor...'):
+   strong=strong_analyses(ready,DF,75.0)
+  unique_matches=strong['Maç'].nunique() if not strong.empty else 0
+  c1,c2,c3=st.columns(3)
+  c1.metric('Taranan maç',len(ready))
+  c2.metric('%75+ bulunan maç',unique_matches)
+  c3.metric('Güçlü seçenek',len(strong))
+  if strong.empty:
+   st.info('Bugün %75 ve üzeri tarihsel başarı gösteren seçenek bulunamadı.')
+  else:
+   st.success(f'🔥 {unique_matches} maçta toplam {len(strong)} adet %75+ seçenek bulundu.')
+   st.dataframe(
+    strong[['Saat','Maç','Lig','Seçenek','Yüzde %','Başarılı','Örnek','Tolerans','MS1','MSX','MS2']],
+    use_container_width=True,
+    hide_index=True
+   )
+   st.caption('Not: Yüzdeler geçmişte benzer MS1/MSX/MS2 oranlarına sahip maçların gerçekleşen sonuçlarından hesaplanır; kesin sonuç garantisi değildir.')
+
+with t3:
+ d=load_daily(ds)
+ if not d.empty:
+  for col in ['iy05_alt','iy05_ust','iy15_alt','iy15_ust','odds_updated_at']:
    if col not in d.columns: d[col]=None
   ready=d[d[['ms1','msx','ms2']].notna().all(axis=1)]
  else: ready=d
@@ -233,7 +346,7 @@ with t2:
    N=len(base);h=int(base[n].sum()) if N else 0;rr.append([n,h,N,round(100*h/N,1) if N else None])
   st.dataframe(pd.DataFrame(rr,columns=['İstatistik','Başarılı','Örnek','Yüzde %']).sort_values('Yüzde %',ascending=False),use_container_width=True,hide_index=True)
   st.dataframe(s[['date_iso','Saat','Maç','İY Skor','Maç Sonu','ms1','msx','ms2']].sort_values(['date_iso','Saat'],ascending=False).head(100),use_container_width=True,hide_index=True)
-with t3:
+with t4:
  q=st.text_input('Takım / maç ara',key='arc');
  if q:st.dataframe(DF[DF.Maç.str.contains(q,case=False,na=False,regex=False)][['date_iso','Saat','Maç','İY Skor','Maç Sonu','ms1','msx','ms2']].sort_values(['date_iso','Saat'],ascending=False).head(200),use_container_width=True,hide_index=True)
                                                                                
